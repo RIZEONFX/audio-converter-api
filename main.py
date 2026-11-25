@@ -5,7 +5,6 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Optional
 
 import yt_dlp
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -16,23 +15,19 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# --- IZINKAN FRONTEND VERCEL MENGAKSES API INI ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Ganti "*" dengan URL Vercel-mu nanti untuk keamanan
+    allow_origins=["*"], # Ganti dengan domain Vercel-mu nanti
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Folder penyimpanan sementara di Cloud
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "audio_output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Database sederhana di memori (karena tanpa Redis)
 jobs_db = {}
 
-# --- SCHEMAS ---
 class InfoRequest(BaseModel):
     url: str
 
@@ -41,14 +36,41 @@ class ProcessRequest(BaseModel):
     metadata: dict
     bitrate: str
 
-# --- FUNGSI DARI SCRIPT ASLIMU ---
+# --- FUNGSI YANG DIPERBARUI UNTUK MENANGANI BOT DETECTION ---
+def get_ydl_opts(extra_opts=None):
+    """Mengembalikan opsi yt-dlp dengan pengaturan anti-blokir."""
+    opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "format": "bestaudio",
+        "nocheckcertificate": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web_safari"], 
+                "player_skip": ["webpage", "configs"],
+            }
+        },
+    }
+    
+    # Coba gunakan cookies dari environment variable jika ada
+    cookies_b64 = os.environ.get("YT_COOKIES")
+    if cookies_b64:
+        import base64
+        cookie_file = Path(tempfile.gettempdir()) / "cookies.txt"
+        cookie_file.write_bytes(base64.b64decode(cookies_b64))
+        opts["cookiefile"] = str(cookie_file)
+        print("Menggunakan file cookies untuk otentikasi.")
+    
+    if extra_opts:
+        opts.update(extra_opts)
+    return opts
+
 def sanitize_filename(name):
     name = re.sub(r'[\\/*?:"<>|]', "", str(name))
     return name.strip()[:150] or "audio"
 
 def get_video_info(url):
-    options = {"quiet": True, "noplaylist": True, "format": "bestaudio"}
-    with yt_dlp.YoutubeDL(options) as ydl:
+    with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
         return ydl.extract_info(url, download=False)
 
 def get_best_audio_format(info):
@@ -58,14 +80,11 @@ def get_best_audio_format(info):
     return max(audio_formats, key=lambda f: (f.get("abr") or f.get("tbr") or 0))
 
 def download_audio(url, temp_dir):
-    options = {
-        "format": "bestaudio",
-        "noplaylist": True,
-        "quiet": True,
+    opts = get_ydl_opts({
         "outtmpl": str(temp_dir / "%(id)s.%(ext)s"),
         "writethumbnail": True,
-    }
-    with yt_dlp.YoutubeDL(options) as ydl:
+    })
+    with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         requested = info.get("requested_downloads") or []
         source = requested[0].get("filepath") if requested else ydl.prepare_filename(info)
@@ -110,7 +129,6 @@ def write_metadata(output, cover, metadata):
             tags.add(APIC(encoding=3, mime="image/png", type=3, desc="cover", data=img.read()))
     tags.save(output, v2_version=3)
 
-# --- BACKGROUND TASK UNTUK PROSES BERAT ---
 def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
     temp_dir = Path(tempfile.mkdtemp(prefix="job_"))
     try:
@@ -141,7 +159,6 @@ def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-# --- ENDPOINTS API ---
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API is running"}
@@ -153,7 +170,6 @@ def get_info(req: InfoRequest):
         best_audio = get_best_audio_format(info)
         bitrate = best_audio.get("abr") or best_audio.get("tbr") if best_audio else None
         
-        # Logika saran bitrate dari script aslimu
         suggested = 192
         if bitrate:
             if bitrate < 96: suggested = 128
@@ -178,6 +194,7 @@ def get_info(req: InfoRequest):
             "availableBitrates": [128, 192, 256, 320]
         }
     except Exception as e:
+        print(f"ERROR di /api/info: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/process")
