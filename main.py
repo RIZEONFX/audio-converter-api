@@ -77,7 +77,7 @@ def get_ydl_opts(extra_opts=None):
     opts = {
         "quiet": True,
         "noplaylist": True,
-        "format": "bestaudio",
+        "format": "bestaudio/best",
         "nocheckcertificate": True,
         "force_ipv4": True,
     }
