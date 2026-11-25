@@ -27,4 +27,8 @@ COPY . .
 
 EXPOSE 10000
 
+RUN deno --version && \
+    python -m pip show yt-dlp && \
+    python -m pip show yt-dlp-ejs
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
