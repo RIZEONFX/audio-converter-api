@@ -42,7 +42,7 @@ class ProcessRequest(BaseModel):
 
 # --- FUNGSI ANTI-BLOKIR YOUTUBE ---
 def get_ydl_opts(extra_opts=None):
-    """Opsi yt-dlp dengan trik menyamar sebagai iOS/Android."""
+    """Opsi yt-dlp dengan trik client web, mweb, dan tv."""
     opts = {
         "quiet": True,
         "noplaylist": True,
@@ -50,7 +50,8 @@ def get_ydl_opts(extra_opts=None):
         "nocheckcertificate": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "android", "web_embedded"],
+                # Memaksa penggunaan client alternatif yang lebih stabil
+                "player_client": ["web", "mweb", "tv"],
             }
         },
     }
