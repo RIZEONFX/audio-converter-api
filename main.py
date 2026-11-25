@@ -43,12 +43,6 @@ def get_ydl_opts(extra_opts=None):
         "noplaylist": True,
         "format": "bestaudio",
         "nocheckcertificate": True,
-        "extractor_args": {
-            "youtube": {
-                # Kombinasi client yang lebih tahan blokir
-                "player_client": ["tv", "web_embedded", "web"],
-                "player_skip": ["webpage"],
-            }
         },
         "force_ipv4": True, # Membantu stabilitas koneksi di cloud
     }
