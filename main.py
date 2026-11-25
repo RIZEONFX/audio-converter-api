@@ -15,19 +15,23 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# Izinkan Frontend Vercel mengakses API ini
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Ganti dengan domain Vercel-mu nanti
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Folder penyimpanan sementara di Cloud
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "audio_output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Database sederhana di memori (karena tanpa Redis)
 jobs_db = {}
 
+# --- SCHEMAS ---
 class InfoRequest(BaseModel):
     url: str
 
@@ -36,9 +40,9 @@ class ProcessRequest(BaseModel):
     metadata: dict
     bitrate: str
 
-# --- FUNGSI YANG DIPERBARUI UNTUK MENANGANI BOT DETECTION ---
+# --- FUNGSI ANTI-BLOKIR YOUTUBE ---
 def get_ydl_opts(extra_opts=None):
-    """Mengembalikan opsi yt-dlp dengan pengaturan anti-blokir."""
+    """Opsi yt-dlp dengan trik menyamar sebagai iOS/Android."""
     opts = {
         "quiet": True,
         "noplaylist": True,
@@ -46,21 +50,10 @@ def get_ydl_opts(extra_opts=None):
         "nocheckcertificate": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web_safari"], 
-                "player_skip": ["webpage", "configs"],
+                "player_client": ["ios", "android", "web_embedded"],
             }
         },
     }
-    
-    # Coba gunakan cookies dari environment variable jika ada
-    cookies_b64 = os.environ.get("YT_COOKIES")
-    if cookies_b64:
-        import base64
-        cookie_file = Path(tempfile.gettempdir()) / "cookies.txt"
-        cookie_file.write_bytes(base64.b64decode(cookies_b64))
-        opts["cookiefile"] = str(cookie_file)
-        print("Menggunakan file cookies untuk otentikasi.")
-    
     if extra_opts:
         opts.update(extra_opts)
     return opts
@@ -99,7 +92,10 @@ def find_thumbnail(video_id, temp_dir):
 def convert_cover_to_png(cover, temp_dir):
     if not cover: return None
     output = temp_dir / "cover.png"
-    subprocess.run(["ffmpeg", "-y", "-i", str(cover), "-frames:v", "1", str(output)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(cover), "-frames:v", "1", str(output)], 
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
     return output if output.exists() else None
 
 def convert_to_mp3(source, output, bitrate, metadata):
@@ -117,7 +113,8 @@ def write_metadata(output, cover, metadata):
     try: tags = ID3(output)
     except ID3NoHeaderError: tags = ID3()
     
-    for tag in ["TIT2", "TPE1", "TALB", "TCON", "APIC"]: tags.delall(tag)
+    for tag in ["TIT2", "TPE1", "TALB", "TCON", "APIC"]: 
+        tags.delall(tag)
     
     tags.add(TIT2(encoding=3, text=metadata.get('title', '')))
     tags.add(TPE1(encoding=3, text=metadata.get('artist', '')))
@@ -129,6 +126,7 @@ def write_metadata(output, cover, metadata):
             tags.add(APIC(encoding=3, mime="image/png", type=3, desc="cover", data=img.read()))
     tags.save(output, v2_version=3)
 
+# --- BACKGROUND TASK UNTUK PROSES BERAT ---
 def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
     temp_dir = Path(tempfile.mkdtemp(prefix="job_"))
     try:
@@ -155,13 +153,15 @@ def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
             }
         })
     except Exception as e:
+        print(f"ERROR SAAT PROSES: {e}")
         jobs_db[job_id].update({"status": "failed", "error": str(e)})
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+# --- ENDPOINTS API ---
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "API is running"}
+    return {"status": "ok", "message": "API is running normally"}
 
 @app.post("/api/info")
 def get_info(req: InfoRequest):
@@ -170,6 +170,7 @@ def get_info(req: InfoRequest):
         best_audio = get_best_audio_format(info)
         bitrate = best_audio.get("abr") or best_audio.get("tbr") if best_audio else None
         
+        # Logika saran bitrate
         suggested = 192
         if bitrate:
             if bitrate < 96: suggested = 128
