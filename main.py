@@ -75,7 +75,7 @@ class ProcessRequest(BaseModel):
 def get_ydl_opts(extra_opts=None):
 
     opts = {
-        "quiet": True,
+        "quiet": False,
         "noplaylist": True,
         "format": "bestaudio/best",
         "nocheckcertificate": True,
