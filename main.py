@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import base64
 from pathlib import Path
 
 import yt_dlp
@@ -15,23 +16,18 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Izinkan Frontend Vercel mengakses API ini
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Folder penyimpanan sementara di Cloud
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "audio_output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Database sederhana di memori (karena tanpa Redis)
 jobs_db = {}
 
-# --- SCHEMAS ---
 class InfoRequest(BaseModel):
     url: str
 
@@ -40,9 +36,8 @@ class ProcessRequest(BaseModel):
     metadata: dict
     bitrate: str
 
-# --- FUNGSI ANTI-BLOKIR YOUTUBE ---
+# --- FUNGSI ANTI-BLOKIR (COOKIES + CLIENT TV) ---
 def get_ydl_opts(extra_opts=None):
-    """Opsi yt-dlp dengan trik client web, mweb, dan tv."""
     opts = {
         "quiet": True,
         "noplaylist": True,
@@ -50,11 +45,26 @@ def get_ydl_opts(extra_opts=None):
         "nocheckcertificate": True,
         "extractor_args": {
             "youtube": {
-                # Memaksa penggunaan client alternatif yang lebih stabil
-                "player_client": ["web", "mweb", "tv"],
+                # Kombinasi client yang lebih tahan blokir
+                "player_client": ["tv", "web_embedded", "web"],
+                "player_skip": ["webpage"],
             }
         },
+        "force_ipv4": True, # Membantu stabilitas koneksi di cloud
     }
+
+    # Membaca cookies dari Environment Variable YT_COOKIES (Base64)
+    cookies_b64 = os.environ.get("YT_COOKIES")
+    if cookies_b64:
+        try:
+            cookie_bytes = base64.b64decode(cookies_b64)
+            cookie_file = Path(tempfile.gettempdir()) / "cookies.txt"
+            cookie_file.write_bytes(cookie_bytes)
+            opts["cookiefile"] = str(cookie_file)
+            print("INFO: Menggunakan cookies dari environment variable.")
+        except Exception as e:
+            print(f"ERROR: Gagal memproses cookies Base64: {e}")
+
     if extra_opts:
         opts.update(extra_opts)
     return opts
@@ -94,7 +104,7 @@ def convert_cover_to_png(cover, temp_dir):
     if not cover: return None
     output = temp_dir / "cover.png"
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(cover), "-frames:v", "1", str(output)], 
+        ["ffmpeg", "-y", "-i", str(cover), "-frames:v", "1", str(output)],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     return output if output.exists() else None
@@ -113,37 +123,28 @@ def convert_to_mp3(source, output, bitrate, metadata):
 def write_metadata(output, cover, metadata):
     try: tags = ID3(output)
     except ID3NoHeaderError: tags = ID3()
-    
-    for tag in ["TIT2", "TPE1", "TALB", "TCON", "APIC"]: 
-        tags.delall(tag)
-    
+    for tag in ["TIT2", "TPE1", "TALB", "TCON", "APIC"]: tags.delall(tag)
     tags.add(TIT2(encoding=3, text=metadata.get('title', '')))
     tags.add(TPE1(encoding=3, text=metadata.get('artist', '')))
     tags.add(TALB(encoding=3, text=metadata.get('album', '')))
     tags.add(TCON(encoding=3, text=metadata.get('genre', '')))
-    
     if cover and cover.exists():
         with open(cover, "rb") as img:
             tags.add(APIC(encoding=3, mime="image/png", type=3, desc="cover", data=img.read()))
     tags.save(output, v2_version=3)
 
-# --- BACKGROUND TASK UNTUK PROSES BERAT ---
 def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
     temp_dir = Path(tempfile.mkdtemp(prefix="job_"))
     try:
         jobs_db[job_id].update({"status": "downloading", "stage": "Mengunduh audio...", "progress": 10})
         source, info = download_audio(url, temp_dir)
-        
         jobs_db[job_id].update({"status": "converting", "stage": "Mengonversi MP3...", "progress": 50})
         filename = sanitize_filename(metadata["title"])
         output = OUTPUT_DIR / f"{job_id}_{filename}.mp3"
-        
         convert_to_mp3(source, output, bitrate, metadata)
-        
         jobs_db[job_id].update({"status": "tagging", "stage": "Menulis metadata...", "progress": 80})
         cover = convert_cover_to_png(find_thumbnail(info.get("id"), temp_dir), temp_dir)
         write_metadata(output, cover, metadata)
-        
         jobs_db[job_id].update({
             "status": "completed", "stage": "Selesai!", "progress": 100,
             "result": {
@@ -159,7 +160,6 @@ def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-# --- ENDPOINTS API ---
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API is running normally"}
@@ -170,15 +170,12 @@ def get_info(req: InfoRequest):
         info = get_video_info(req.url)
         best_audio = get_best_audio_format(info)
         bitrate = best_audio.get("abr") or best_audio.get("tbr") if best_audio else None
-        
-        # Logika saran bitrate
         suggested = 192
         if bitrate:
             if bitrate < 96: suggested = 128
             elif bitrate < 160: suggested = 192
             elif bitrate < 224: suggested = 256
             else: suggested = 320
-
         return {
             "videoId": info.get("id"),
             "title": info.get("title", "Unknown"),
@@ -216,11 +213,8 @@ def get_status(job_id: str):
 def download_file(job_id: str):
     if job_id not in jobs_db or jobs_db[job_id]["status"] != "completed":
         raise HTTPException(status_code=400, detail="File not ready")
-    
     file_name = jobs_db[job_id]["result"]["fileName"]
     file_path = OUTPUT_DIR / f"{job_id}_{file_name}"
-    
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on server")
-        
     return FileResponse(path=file_path, filename=file_name, media_type="audio/mpeg")
