@@ -1,34 +1,20 @@
-
 FROM python:3.11-slim
 
-# Install FFmpeg dan kebutuhan Deno
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    unzip \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Instal ffmpeg (wajib untuk konversi audio)
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Install Deno JavaScript runtime
-RUN curl -fsSL https://deno.land/install.sh | sh
-
-# Tambahkan Deno ke PATH
-ENV PATH="/root/.deno/bin:${PATH}"
-
+# Set working directory
 WORKDIR /app
 
-# Install Python dependencies
+# Copy requirements dan install dependencies (pastikan yt-dlp versi terbaru)
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
-# Copy backend
+# Copy sisa kode aplikasi
 COPY . .
 
-EXPOSE 10000
+# Expose port (gunakan 8000 agar sesuai dengan perintah uvicorn di bawah)
+EXPOSE 8000
 
-RUN deno --version && \
-    python -m pip show yt-dlp && \
-    python -m pip show yt-dlp-ejs
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Jalankan server
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
