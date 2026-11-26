@@ -48,10 +48,19 @@ def get_ydl_opts(extra_opts=None):
         "nocheckcertificate": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv", "web_embedded", "web"],
+                # Kombinasi client yang lebih stabil menghindari SABR
+                "player_client": ["mweb", "tv", "web_safari"],
                 "player_skip": ["webpage"],
             }
         },
+        # Memaksa yt-dlp mengunduh skrip solver (EJS) dari GitHub
+        "remote_components": ["ejs:github"],
+        # Memberitahu yt-dlp untuk menggunakan Deno
+        "js_runtimes": ["deno"],
+        # Retry otomatis jika terjadi error sementara
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 3,
         "force_ipv4": True,
     }
 
