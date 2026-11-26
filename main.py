@@ -1,4 +1,3 @@
-
 import os
 import re
 import shutil
@@ -6,34 +5,18 @@ import subprocess
 import tempfile
 import uuid
 import base64
-
 from pathlib import Path
 
 import yt_dlp
-
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-
-from mutagen.id3 import (
-    ID3,
-    ID3NoHeaderError,
-    TIT2,
-    TPE1,
-    TALB,
-    TCON,
-    APIC,
-)
-
+from mutagen.id3 import ID3, ID3NoHeaderError, TIT2, TPE1, TALB, TCON, APIC
 from pydantic import BaseModel
-
-
-# ==========================================
-# FASTAPI CONFIGURATION
-# ==========================================
 
 app = FastAPI()
 
+# Izinkan Frontend Vercel/Netlify mengakses API ini
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,664 +25,217 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ==========================================
-# STORAGE
-# ==========================================
-
+# Folder penyimpanan sementara
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "audio_output"
-
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 jobs_db = {}
 
-
-# ==========================================
-# REQUEST MODELS
-# ==========================================
-
+# --- SCHEMAS ---
 class InfoRequest(BaseModel):
     url: str
-
 
 class ProcessRequest(BaseModel):
     url: str
     metadata: dict
     bitrate: str
 
-
-# ==========================================
-# YT-DLP CONFIGURATION
-# ==========================================
-
+# --- FUNGSI ANTI-BLOKIR YOUTUBE ---
 def get_ydl_opts(extra_opts=None):
-
     opts = {
-        "quiet": False,
+        "quiet": True,
         "noplaylist": True,
-        "format": "bestaudio/best",
+        "format": "bestaudio",
         "nocheckcertificate": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv", "web_embedded", "web"],
+                "player_skip": ["webpage"],
+            }
+        },
         "force_ipv4": True,
     }
 
-    # Read cookies from environment variable
-    # YT_COOKIES must contain Base64 encoded Netscape cookies
-
+    # Membaca cookies dari Environment Variable YT_COOKIES (jika ada)
     cookies_b64 = os.environ.get("YT_COOKIES")
-
     if cookies_b64:
-
         try:
-            cookie_bytes = base64.b64decode(
-                cookies_b64,
-                validate=True
-            )
-
-            cookie_file = (
-                Path(tempfile.gettempdir()) / "cookies.txt"
-            )
-
+            cookie_bytes = base64.b64decode(cookies_b64)
+            cookie_file = Path(tempfile.gettempdir()) / "cookies.txt"
             cookie_file.write_bytes(cookie_bytes)
-
             opts["cookiefile"] = str(cookie_file)
-
-            print("INFO: YouTube cookies loaded.")
-
+            print("INFO: Menggunakan cookies dari environment variable.")
         except Exception as e:
-            print(f"ERROR: Failed to process cookies: {e}")
+            print(f"ERROR: Gagal memproses cookies Base64: {e}")
 
-    # Apply additional options
     if extra_opts:
         opts.update(extra_opts)
-
     return opts
 
-
-# ==========================================
-# FILE UTILITIES
-# ==========================================
-
 def sanitize_filename(name):
-
-    name = re.sub(
-        r'[\\/*?:"<>|]',
-        "",
-        str(name)
-    )
-
+    name = re.sub(r'[\\/*?:"<>|]', "", str(name))
     return name.strip()[:150] or "audio"
 
-
-# ==========================================
-# YOUTUBE VIDEO INFORMATION
-# ==========================================
-
 def get_video_info(url):
-
     with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
-
-        return ydl.extract_info(
-            url,
-            download=False
-        )
-
+        return ydl.extract_info(url, download=False)
 
 def get_best_audio_format(info):
-
     formats = info.get("formats", [])
-
-    audio_formats = [
-        f for f in formats
-        if f.get("acodec") != "none"
-        and f.get("vcodec") == "none"
-    ]
-
-    if not audio_formats:
+    audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+    if not audio_formats: 
         return None
-
-    return max(
-        audio_formats,
-        key=lambda f: (
-            f.get("abr") or f.get("tbr") or 0
-        )
-    )
-
-
-# ==========================================
-# AUDIO DOWNLOAD
-# ==========================================
+    return max(audio_formats, key=lambda f: (f.get("abr") or f.get("tbr") or 0))
 
 def download_audio(url, temp_dir):
-
     opts = get_ydl_opts({
-
-        "outtmpl": str(
-            temp_dir / "%(id)s.%(ext)s"
-        ),
-
+        "outtmpl": str(temp_dir / "%(id)s.%(ext)s"),
         "writethumbnail": True,
-
     })
-
     with yt_dlp.YoutubeDL(opts) as ydl:
-
-        info = ydl.extract_info(
-            url,
-            download=True
-        )
-
+        info = ydl.extract_info(url, download=True)
         requested = info.get("requested_downloads") or []
-
-        source = (
-            requested[0].get("filepath")
-            if requested
-            else ydl.prepare_filename(info)
-        )
-
+        source = requested[0].get("filepath") if requested else ydl.prepare_filename(info)
     return Path(source), info
 
-
-# ==========================================
-# THUMBNAIL UTILITIES
-# ==========================================
-
 def find_thumbnail(video_id, temp_dir):
-
-    for ext in [
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp",
-        ".avif"
-    ]:
-
+    for ext in [".jpg", ".jpeg", ".png", ".webp", ".avif"]:
         candidate = temp_dir / f"{video_id}{ext}"
-
-        if candidate.exists():
+        if candidate.exists(): 
             return candidate
-
     return None
 
-
 def convert_cover_to_png(cover, temp_dir):
-
-    if not cover:
+    if not cover: 
         return None
-
     output = temp_dir / "cover.png"
-
     subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(cover),
-            "-frames:v",
-            "1",
-            str(output)
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        ["ffmpeg", "-y", "-i", str(cover), "-frames:v", "1", str(output)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-
     return output if output.exists() else None
 
-
-# ==========================================
-# MP3 CONVERSION
-# ==========================================
-
-def convert_to_mp3(
-    source,
-    output,
-    bitrate,
-    metadata
-):
-
+def convert_to_mp3(source, output, bitrate, metadata):
     cmd = [
-
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(source),
-
-        "-map",
-        "0:a:0",
-
-        "-vn",
-
-        "-c:a",
-        "libmp3lame",
-
-        "-b:a",
-        f"{bitrate}k",
-
-        "-id3v2_version",
-        "3",
-
-        "-metadata",
-        f"title={metadata.get('title', '')}",
-
-        "-metadata",
-        f"artist={metadata.get('artist', '')}",
-
-        "-metadata",
-        f"album={metadata.get('album', '')}",
-
-        "-metadata",
-        f"genre={metadata.get('genre', '')}",
-
-        str(output)
-
+        "ffmpeg", "-y", "-i", str(source), "-map", "0:a:0", "-vn",
+        "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-id3v2_version", "3",
+        "-metadata", f"title={metadata.get('title', '')}",
+        "-metadata", f"artist={metadata.get('artist', '')}",
+        "-metadata", f"album={metadata.get('album', '')}",
+        "-metadata", f"genre={metadata.get('genre', '')}", str(output)
     ]
-
-    subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-
-# ==========================================
-# MP3 METADATA
-# ==========================================
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def write_metadata(output, cover, metadata):
-
-    try:
+    try: 
         tags = ID3(output)
-
-    except ID3NoHeaderError:
+    except ID3NoHeaderError: 
         tags = ID3()
-
-    # Remove old metadata
-    for tag in [
-        "TIT2",
-        "TPE1",
-        "TALB",
-        "TCON",
-        "APIC"
-    ]:
-
+        
+    for tag in ["TIT2", "TPE1", "TALB", "TCON", "APIC"]: 
         tags.delall(tag)
-
-    # Add new metadata
-    tags.add(
-        TIT2(
-            encoding=3,
-            text=metadata.get("title", "")
-        )
-    )
-
-    tags.add(
-        TPE1(
-            encoding=3,
-            text=metadata.get("artist", "")
-        )
-    )
-
-    tags.add(
-        TALB(
-            encoding=3,
-            text=metadata.get("album", "")
-        )
-    )
-
-    tags.add(
-        TCON(
-            encoding=3,
-            text=metadata.get("genre", "")
-        )
-    )
-
-    # Add cover art
+        
+    tags.add(TIT2(encoding=3, text=metadata.get('title', '')))
+    tags.add(TPE1(encoding=3, text=metadata.get('artist', '')))
+    tags.add(TALB(encoding=3, text=metadata.get('album', '')))
+    tags.add(TCON(encoding=3, text=metadata.get('genre', '')))
+    
     if cover and cover.exists():
-
         with open(cover, "rb") as img:
+            tags.add(APIC(encoding=3, mime="image/png", type=3, desc="cover", data=img.read()))
+    tags.save(output, v2_version=3)
 
-            tags.add(
-                APIC(
-                    encoding=3,
-                    mime="image/png",
-                    type=3,
-                    desc="cover",
-                    data=img.read()
-                )
-            )
-
-    tags.save(
-        output,
-        v2_version=3
-    )
-
-
-# ==========================================
-# BACKGROUND AUDIO PROCESS
-# ==========================================
-
-def process_audio_task(
-    job_id: str,
-    url: str,
-    metadata: dict,
-    bitrate: str
-):
-
-    temp_dir = Path(
-        tempfile.mkdtemp(prefix="job_")
-    )
-
+def process_audio_task(job_id: str, url: str, metadata: dict, bitrate: str):
+    temp_dir = Path(tempfile.mkdtemp(prefix="job_"))
     try:
-
-        # Downloading
+        jobs_db[job_id].update({"status": "downloading", "stage": "Mengunduh audio...", "progress": 10})
+        source, info = download_audio(url, temp_dir)
+        
+        jobs_db[job_id].update({"status": "converting", "stage": "Mengonversi MP3...", "progress": 50})
+        filename = sanitize_filename(metadata["title"])
+        output = OUTPUT_DIR / f"{job_id}_{filename}.mp3"
+        
+        convert_to_mp3(source, output, bitrate, metadata)
+        
+        jobs_db[job_id].update({"status": "tagging", "stage": "Menulis metadata...", "progress": 80})
+        cover = convert_cover_to_png(find_thumbnail(info.get("id"), temp_dir), temp_dir)
+        write_metadata(output, cover, metadata)
+        
         jobs_db[job_id].update({
-
-            "status": "downloading",
-            "stage": "Mengunduh audio...",
-            "progress": 10
-
-        })
-
-        source, info = download_audio(
-            url,
-            temp_dir
-        )
-
-        # Converting
-        jobs_db[job_id].update({
-
-            "status": "converting",
-            "stage": "Mengonversi MP3...",
-            "progress": 50
-
-        })
-
-        filename = sanitize_filename(
-            metadata["title"]
-        )
-
-        output = OUTPUT_DIR / (
-            f"{job_id}_{filename}.mp3"
-        )
-
-        convert_to_mp3(
-            source,
-            output,
-            bitrate,
-            metadata
-        )
-
-        # Writing metadata
-        jobs_db[job_id].update({
-
-            "status": "tagging",
-            "stage": "Menulis metadata...",
-            "progress": 80
-
-        })
-
-        cover = convert_cover_to_png(
-            find_thumbnail(
-                info.get("id"),
-                temp_dir
-            ),
-            temp_dir
-        )
-
-        write_metadata(
-            output,
-            cover,
-            metadata
-        )
-
-        # Completed
-        jobs_db[job_id].update({
-
-            "status": "completed",
-            "stage": "Selesai!",
-            "progress": 100,
-
+            "status": "completed", "stage": "Selesai!", "progress": 100,
             "result": {
-
                 "fileName": f"{filename}.mp3",
-
                 "fileSize": output.stat().st_size,
-
                 "bitrate": bitrate,
-
-                "downloadUrl": (
-                    f"/api/jobs/{job_id}/download"
-                )
-
+                "downloadUrl": f"/api/jobs/{job_id}/download"
             }
-
         })
-
     except Exception as e:
-
         print(f"ERROR SAAT PROSES: {e}")
-
-        jobs_db[job_id].update({
-
-            "status": "failed",
-            "error": str(e)
-
-        })
-
+        jobs_db[job_id].update({"status": "failed", "error": str(e)})
     finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-        shutil.rmtree(
-            temp_dir,
-            ignore_errors=True
-        )
-
-
-# ==========================================
-# HEALTH CHECK
-# ==========================================
-
+# --- ENDPOINTS API ---
 @app.get("/")
 def health_check():
-
-    return {
-
-        "status": "ok",
-
-        "message": "API is running normally"
-
-    }
-
-
-# ==========================================
-# GET YOUTUBE INFORMATION
-# ==========================================
+    return {"status": "ok", "message": "API is running normally"}
 
 @app.post("/api/info")
 def get_info(req: InfoRequest):
-
     try:
-
         info = get_video_info(req.url)
-
         best_audio = get_best_audio_format(info)
-
-        bitrate = (
-            best_audio.get("abr")
-            or best_audio.get("tbr")
-            if best_audio
-            else None
-        )
-
+        bitrate = best_audio.get("abr") or best_audio.get("tbr") if best_audio else None
+        
         suggested = 192
-
         if bitrate:
-
-            if bitrate < 96:
-                suggested = 128
-
-            elif bitrate < 160:
-                suggested = 192
-
-            elif bitrate < 224:
-                suggested = 256
-
-            else:
-                suggested = 320
-
+            if bitrate < 96: suggested = 128
+            elif bitrate < 160: suggested = 192
+            elif bitrate < 224: suggested = 256
+            else: suggested = 320
+                
         return {
-
             "videoId": info.get("id"),
-
-            "title": info.get(
-                "title",
-                "Unknown"
-            ),
-
-            "artist": (
-                info.get("artist")
-                or info.get("uploader")
-                or "Unknown"
-            ),
-
+            "title": info.get("title", "Unknown"),
+            "artist": info.get("artist") or info.get("uploader") or "Unknown",
             "album": info.get("album") or "",
-
             "genre": info.get("genre") or "",
-
             "duration": info.get("duration"),
-
             "thumbnailUrl": info.get("thumbnail"),
-
             "audio": {
-
-                "codec": (
-                    best_audio.get("acodec")
-                    if best_audio
-                    else None
-                ),
-
+                "codec": best_audio.get("acodec") if best_audio else None,
                 "bitrate": bitrate,
-
-                "sampleRate": (
-                    best_audio.get("asr")
-                    if best_audio
-                    else None
-                ),
-
+                "sampleRate": best_audio.get("asr") if best_audio else None,
                 "suggestedBitrate": suggested
-
             },
-
-            "availableBitrates": [
-                128,
-                192,
-                256,
-                320
-            ]
-
+            "availableBitrates": [128, 192, 256, 320]
         }
-
     except Exception as e:
-
         print(f"ERROR di /api/info: {e}")
-
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
-
-
-# ==========================================
-# START AUDIO PROCESS
-# ==========================================
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/process")
-def start_process(
-    req: ProcessRequest,
-    background_tasks: BackgroundTasks
-):
-
+def start_process(req: ProcessRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-
-    jobs_db[job_id] = {
-
-        "jobId": job_id,
-
-        "status": "queued",
-
-        "progress": 0,
-
-        "stage": "Menunggu antrean..."
-
-    }
-
-    background_tasks.add_task(
-        process_audio_task,
-        job_id,
-        req.url,
-        req.metadata,
-        req.bitrate
-    )
-
-    return {
-
-        "jobId": job_id,
-
-        "status": "queued"
-
-    }
-
-
-# ==========================================
-# GET JOB STATUS
-# ==========================================
+    jobs_db[job_id] = {"jobId": job_id, "status": "queued", "progress": 0, "stage": "Menunggu antrean..."}
+    background_tasks.add_task(process_audio_task, job_id, req.url, req.metadata, req.bitrate)
+    return {"jobId": job_id, "status": "queued"}
 
 @app.get("/api/jobs/{job_id}")
 def get_status(job_id: str):
-
     if job_id not in jobs_db:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found"
-        )
-
+        raise HTTPException(status_code=404, detail="Job not found")
     return jobs_db[job_id]
-
-
-# ==========================================
-# DOWNLOAD MP3
-# ==========================================
 
 @app.get("/api/jobs/{job_id}/download")
 def download_file(job_id: str):
-
-    if (
-        job_id not in jobs_db
-        or jobs_db[job_id]["status"] != "completed"
-    ):
-
-        raise HTTPException(
-            status_code=400,
-            detail="File not ready"
-        )
-
+    if job_id not in jobs_db or jobs_db[job_id]["status"] != "completed":
+        raise HTTPException(status_code=400, detail="File not ready")
+        
     file_name = jobs_db[job_id]["result"]["fileName"]
-
-    file_path = OUTPUT_DIR / (
-        f"{job_id}_{file_name}"
-    )
-
+    file_path = OUTPUT_DIR / f"{job_id}_{file_name}"
+    
     if not file_path.exists():
-
-        raise HTTPException(
-            status_code=404,
-            detail="File not found on server"
-        )
-
-    return FileResponse(
-        path=file_path,
-        filename=file_name,
-        media_type="audio/mpeg"
-    )
+        raise HTTPException(status_code=404, detail="File not found on server")
+        
+    return FileResponse(path=file_path, filename=file_name, media_type="audio/mpeg")
